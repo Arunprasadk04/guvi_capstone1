@@ -33,6 +33,20 @@ def display_video_info():
     st.write("### Video Info")
     st.write(pd.DataFrame(video_info))
 
+# Function to display playlist info
+def display_channel_data():
+    query = "SELECT * FROM playlist_data;"
+    channel_data = fetch_data_from_mysql(query)
+    st.write("### Playlist Data")
+    st.write(pd.DataFrame(channel_data))
+
+# Function to display comment info
+def display_channel_data():
+    query = "SELECT * FROM comment_data;"
+    channel_data = fetch_data_from_mysql(query)
+    st.write("### Comment Data")
+    st.write(pd.DataFrame(channel_data))
+
 # Streamlit app
 def main():
     st.title("YouTube Data Viewer")
