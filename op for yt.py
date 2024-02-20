@@ -11,6 +11,7 @@ mysql_config = {
 }
 
 # Function to fetch data from MySQL
+@st.cache
 def fetch_data_from_mysql(query):
     connection = mysql.connector.connect(**mysql_config)
     cursor = connection.cursor(dictionary=True)
@@ -33,19 +34,19 @@ def display_video_info():
     st.write("### Video Info")
     st.write(pd.DataFrame(video_info))
 
-# Function to display playlist info
-def display_channel_data():
-    query = "SELECT * FROM playlist_data;"
-    channel_data = fetch_data_from_mysql(query)
-    st.write("### Playlist Data")
-    st.write(pd.DataFrame(channel_data))
+# Function to display playlist data
+def display_playlist_info():
+    query = "SELECT * FROM playlist_info;"
+    playlist_info = fetch_data_from_mysql(query)
+    st.write("### Playlist Info")
+    st.write(pd.DataFrame(playlist_info))
 
-# Function to display comment info
-def display_channel_data():
-    query = "SELECT * FROM comment_data;"
-    channel_data = fetch_data_from_mysql(query)
-    st.write("### Comment Data")
-    st.write(pd.DataFrame(channel_data))
+# Function to display comment data
+def display_comment_info():
+    query = "SELECT * FROM comment_info;"
+    comment_info = fetch_data_from_mysql(query)
+    st.write("### Comment Info")
+    st.write(pd.DataFrame(comment_info))
 
 # Streamlit app
 def main():
@@ -56,6 +57,12 @@ def main():
 
     # Display video info
     display_video_info()
+
+    # Display playlist data
+    display_playlist_info()
+
+    # Display comment data
+    display_comment_info()
 
 if __name__ == "__main__":
     main()
