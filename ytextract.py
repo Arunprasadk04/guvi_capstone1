@@ -4,160 +4,18 @@ import traceback
 from googleapiclient.discovery import build
 from datetime import datetime
 
-# Function to connect to MySQL
-def connect_to_mysql(host, user, password):
+# Function to connect to YouTube API
+def connect_to_youtube_api(api_key):
     try:
-        mysql_connection = mysql.connector.connect(
-            host=host,
-            user=user,
-            password=password
-        )
-        print("Connecting to MySQL...")
-        print("MySQL connection successful.")
-        return mysql_connection
-    except mysql.connector.Error as err:
-        print(f"An error occurred while connecting to MySQL: {err}")
-        return None
-
-# Function to create MySQL database
-def create_mysql_database(mysql_connection, database):
-    try:
-        mysql_cursor = mysql_connection.cursor()
-        mysql_cursor.execute(f"CREATE DATABASE IF NOT EXISTS {database}")
-        print("Creating MySQL database...")
-        print(f"MySQL database created successfully (if it didn't exist).")
-        mysql_cursor.execute(f"USE {database}")  # Switch to the database
-    except mysql.connector.Error as err:
-        print(f"An error occurred while creating MySQL database: {err}")
-
-# Function to create MySQL tables
-def create_mysql_tables(mysql_connection):
-    try:
-        mysql_cursor = mysql_connection.cursor()
-        mysql_cursor.execute("""
-            CREATE TABLE IF NOT EXISTS channel_data (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                channel_id VARCHAR(255) UNIQUE,
-                channel_name VARCHAR(255),
-                subscribers INT,
-                total_videos INT
-            )
-        """)
-        mysql_cursor.execute("""
-            CREATE TABLE IF NOT EXISTS video_info (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                video_id VARCHAR(255) UNIQUE,
-                title VARCHAR(255),
-                description TEXT,
-                thumbnail_url TEXT,
-                channel_title VARCHAR(255),
-                published_at DATETIME
-            )
-        """)
-        mysql_cursor.execute("""
-            CREATE TABLE IF NOT EXISTS playlist_info (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                playlist_id VARCHAR(255) UNIQUE,
-                title VARCHAR(255),
-                description TEXT,
-                channel_title VARCHAR(255),
-                total_videos INT
-            )
-        """)
-        mysql_cursor.execute("""
-            CREATE TABLE IF NOT EXISTS comment_info (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                comment_id VARCHAR(255) UNIQUE,
-                video_id VARCHAR(255),
-                author VARCHAR(255),
-                text TEXT,
-                like_count INT,
-                published_at DATETIME
-            )
-        """)
-        print("Creating MySQL tables...")
-    except mysql.connector.Error as err:
-        print(f"An error occurred while creating MySQL tables: {err}")
-
-# Function to connect to MongoDB
-def connect_to_mongodb(uri):
-    try:
-        mongo_client = pymongo.MongoClient(uri)
-        print("Connecting to MongoDB...")
-        return mongo_client
-    except pymongo.errors.ConnectionFailure as err:
-        print(f"An error occurred while connecting to MongoDB: {err}")
-        return None
-
-# Function to fetch data from MongoDB
-def fetch_data_from_mongodb(mongo_client, collection_name):
-    try:
-        mongo_db = mongo_client.youtube
-        collection = mongo_db[collection_name]
-        data = list(collection.find())
-        return data
+        youtube_api = build("youtube", "v3", developerKey=api_key)
+        print("Connecting to YouTube API...")
+        return youtube_api
     except Exception as e:
-        print(f"An error occurred while fetching data from MongoDB: {e}")
+        print(f"An error occurred while connecting to YouTube API: {e}")
+        return None
 
-# Function to migrate data to MySQL
-def migrate_to_mysql(mysql_connection, channel_data, video_info, playlist_info, comment_info):
-    try:
-        mysql_cursor = mysql_connection.cursor()
-
-        for entry in channel_data:
-            # Check if channel ID already exists in MySQL
-            mysql_cursor.execute("SELECT * FROM channel_data WHERE channel_id = %s", (entry["channel_id"],))
-            result = mysql_cursor.fetchone()
-            if result:
-                print(f"Channel with ID {entry['channel_id']} already exists in MySQL. Skipping insertion.")
-            else:
-                mysql_cursor.execute("""
-                    INSERT INTO channel_data (channel_id, channel_name, subscribers, total_videos)
-                    VALUES (%s, %s, %s, %s);
-                """, (entry["channel_id"], entry["channel_name"], entry["subscribers"], entry["total_videos"]))
-
-        for entry in video_info:
-            # Convert MongoDB ObjectId to str
-            entry["video_id"] = str(entry["video_id"])
-            mysql_cursor.execute("""
-                INSERT INTO video_info (video_id, title, description, thumbnail_url, channel_title, published_at)
-                VALUES (%s, %s, %s, %s, %s, %s);
-            """, (
-            entry["video_id"], entry["title"], entry["description"], entry["thumbnail_url"], entry["channel_title"],
-            entry["published_at"]))
-
-        for entry in playlist_info:
-            # Convert MongoDB ObjectId to str
-            entry["playlist_id"] = str(entry["playlist_id"])
-            # Check if playlist ID already exists in MySQL
-            mysql_cursor.execute("SELECT * FROM playlist_info WHERE playlist_id = %s", (entry["playlist_id"],))
-            result = mysql_cursor.fetchone()
-            if result:
-                print(f"Playlist with ID {entry['playlist_id']} already exists in MySQL. Skipping insertion.")
-            else:
-                mysql_cursor.execute("""
-                    INSERT INTO playlist_info (playlist_id, title, description, channel_title, total_videos)
-                    VALUES (%s, %s, %s, %s, %s);
-                """, (entry["playlist_id"], entry["title"], entry["description"], entry["channel_title"],
-                      entry["total_videos"]))
-
-        for entry in comment_info:
-            # Convert MongoDB ObjectId to str
-            entry["comment_id"] = str(entry["comment_id"])
-            mysql_cursor.execute("""
-                INSERT INTO comment_info (comment_id, video_id, author, text, like_count, published_at)
-                VALUES (%s, %s, %s, %s, %s, %s);
-            """, (entry["comment_id"], entry["video_id"], entry["author"], entry["text"], entry["like_count"],
-                  entry["published_at"]))
-
-        mysql_connection.commit()
-
-    except mysql.connector.Error as err:
-        print(f"An error occurred while migrating data to MySQL: {err}")
-        traceback.print_exc()
-
-# Function to fetch data from YouTube API and insert into MongoDB
-def fetch_and_insert_youtube_data(youtube_api, mongo_client, channel_ids):
+# Function to fetch data from YouTube API
+def fetch_youtube_data(youtube_api, channel_ids):
     try:
         # Initialize lists for storing data
         channel_data = []
@@ -233,88 +91,168 @@ def fetch_and_insert_youtube_data(youtube_api, mongo_client, channel_ids):
             else:
                 print(f"No channel found with ID: {channel_id}")
 
-        if comment_info:
-            # Insert comment data into MongoDB
-            mongo_db = mongo_client.youtube
-            comment_collection = mongo_db.comment
-            comment_collection.insert_many(comment_info)
-            print("Comment data inserted into MongoDB.")
-
-        if video_info:
-            # Insert video data into MongoDB
-            video_collection = mongo_db.video
-            video_collection.insert_many(video_info)
-            print("Video data inserted into MongoDB.")
-
-        if playlist_info:
-            # Insert playlist data into MongoDB
-            playlist_collection = mongo_db.playlist
-            playlist_collection.insert_many(playlist_info)
-            print("Playlist data inserted into MongoDB.")
-
-        if channel_data:
-            # Insert channel data into MongoDB
-            channels_collection = mongo_db.channels
-            channels_collection.insert_many(channel_data)
-            print("Channel data inserted into MongoDB.")
+        return channel_data, video_info, playlist_info, comment_info
 
     except Exception as e:
-        print(f"An error occurred while fetching and inserting YouTube data: {e}")
-        traceback.print_exc()
+        print(f"An error occurred while fetching YouTube data: {e}")
+        return None, None, None, None
+
+# Function to insert data into MongoDB
+def insert_into_mongodb(mongo_client, channel_data, video_info, playlist_info, comment_info):
+    try:
+        mongo_db = mongo_client.youtube
+        if channel_data:
+            mongo_db.channels.insert_many(channel_data)
+        if video_info:
+            mongo_db.video.insert_many(video_info)
+        if playlist_info:
+            mongo_db.playlist.insert_many(playlist_info)
+        if comment_info:
+            mongo_db.comment.insert_many(comment_info)
+        print("Data inserted into MongoDB.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while inserting data into MongoDB: {e}")
+        return False
+
+# Function to create MySQL database and tables
+def create_mysql_database_and_tables(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+
+        # Create MySQL database if not exists
+        mysql_cursor.execute("CREATE DATABASE IF NOT EXISTS youtube_data")
+        mysql_cursor.execute("USE youtube_data")
+
+        # Create MySQL tables
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                channel_id VARCHAR(255) ,
+                channel_name VARCHAR(255),
+                subscribers INT,
+                total_videos INT
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                video_id VARCHAR(255),
+                title VARCHAR(255),
+                description TEXT,
+                thumbnail_url TEXT,
+                channel_title VARCHAR(255),
+                published_at DATETIME
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS playlist_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                playlist_id VARCHAR(255),
+                title VARCHAR(255),
+                description TEXT,
+                channel_title VARCHAR(255),
+                total_videos INT
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS comment_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                comment_id VARCHAR(255),
+                video_id VARCHAR(255),
+                author VARCHAR(255),
+                text TEXT,
+                like_count INT,
+                published_at DATETIME
+            )
+        """)
+        print("MySQL database and tables created successfully.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while creating MySQL database and tables: {e}")
+        return False
+
+# Function to migrate data from MongoDB to MySQL
+def migrate_data_to_mysql(mysql_connection, mongo_client):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mongo_db = mongo_client.youtube
+
+        # Fetch data from MongoDB
+        channel_data = list(mongo_db.channels.find())
+        video_info = list(mongo_db.video.find())
+        playlist_info = list(mongo_db.playlist.find())
+        comment_info = list(mongo_db.comment.find())
+
+        # Migrate data to MySQL
+        for entry in channel_data:
+            mysql_cursor.execute("SELECT * FROM channel_data WHERE channel_id = %s", (entry["channel_id"],))
+            result = mysql_cursor.fetchone()
+            if not result:
+                mysql_cursor.execute("INSERT INTO channel_data (channel_id, channel_name, subscribers, total_videos) VALUES (%s, %s, %s, %s)",
+                                     (entry["channel_id"], entry["channel_name"], entry["subscribers"], entry["total_videos"]))
+        for entry in video_info:
+            mysql_cursor.execute("INSERT INTO video_info (video_id, title, description, thumbnail_url, channel_title, published_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                                 (entry["video_id"], entry["title"], entry["description"], entry["thumbnail_url"], entry["channel_title"], entry["published_at"]))
+        for entry in playlist_info:
+            mysql_cursor.execute("INSERT INTO playlist_info (playlist_id, title, description, channel_title, total_videos) VALUES (%s, %s, %s, %s, %s)",
+                                 (entry["playlist_id"], entry["title"], entry["description"], entry["channel_title"], entry["total_videos"]))
+        for entry in comment_info:
+            mysql_cursor.execute("INSERT INTO comment_info (comment_id, video_id, author, text, like_count, published_at) VALUES (%s, %s, %s, %s, %s, %s)",
+                                 (entry["comment_id"], entry["video_id"], entry["author"], entry["text"], entry["like_count"], entry["published_at"]))
+
+        mysql_connection.commit()
+        print("Data migrated from MongoDB to MySQL successfully.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while migrating data from MongoDB to MySQL: {e}")
+        return False
 
 # Main function
 def main():
     try:
         # Define API key
-        api_key = "AIzaSyDVlkGd1D4zEtr-fSDDOmN3uObLl19y8Ws"
+        api_key = "AIzaSyBE5C2pQ9xw6mcwdyciOREzhVUzUf1OZec"
 
-        # Build the YouTube API service
-        youtube_api = build("youtube", "v3", developerKey=api_key)
-
-        # MongoDB URI
-        mongo_uri = "mongodb://localhost:27017/"
-
-        # Connect to MongoDB
-        mongo_client = connect_to_mongodb(mongo_uri)
-        if not mongo_client:
+        # Connect to YouTube API
+        youtube_api = connect_to_youtube_api(api_key)
+        if not youtube_api:
             return
-
-        # MySQL configurations
-        mysql_host = "localhost"
-        mysql_user = "root"
-        mysql_password = "123456"
-        mysql_database = "youtube_data"
-
-        # Connect to MySQL
-        mysql_connection = connect_to_mysql(mysql_host, mysql_user, mysql_password)
-        if not mysql_connection:
-            return
-
-        # Create the MySQL database if it doesn't exist
-        create_mysql_database(mysql_connection, mysql_database)
-
-        # Now select the database
-        mysql_cursor = mysql_connection.cursor()
-        mysql_cursor.execute(f"USE {mysql_database}")
-
-        # Create MySQL tables
-        create_mysql_tables(mysql_connection)
 
         # Enter the channel IDs separated by comma
         channel_ids = input("Enter the channel IDs separated by comma: ").split(",")
         print(f"Entered channel IDs: {channel_ids}")
 
-        # Fetch data from YouTube API and insert into MongoDB
-        fetch_and_insert_youtube_data(youtube_api, mongo_client, channel_ids)
+        # Fetch data from YouTube API
+        channel_data, video_info, playlist_info, comment_info = fetch_youtube_data(youtube_api, channel_ids)
+        if not channel_data or not video_info or not playlist_info or not comment_info:
+            return
 
-        # Fetch data from MongoDB collections
-        channel_data = fetch_data_from_mongodb(mongo_client, "channels")
-        video_info = fetch_data_from_mongodb(mongo_client, "video")
-        playlist_info = fetch_data_from_mongodb(mongo_client, "playlist")
-        comment_info = fetch_data_from_mongodb(mongo_client, "comment")
+        # Connect to MongoDB
+        mongo_client = pymongo.MongoClient("mongodb://localhost:27017/")
+        if not mongo_client:
+            return
 
-        # Migrate data to MySQL
-        migrate_to_mysql(mysql_connection, channel_data, video_info, playlist_info, comment_info)
+        # Insert data into MongoDB
+        if not insert_into_mongodb(mongo_client, channel_data, video_info, playlist_info, comment_info):
+            return
+
+        # Connect to MySQL
+        mysql_connection = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="123456"
+        )
+        if not mysql_connection:
+            return
+
+        # Create MySQL database and tables
+        if not create_mysql_database_and_tables(mysql_connection):
+            return
+
+        # Migrate data from MongoDB to MySQL
+        if not migrate_data_to_mysql(mysql_connection, mongo_client):
+            return
 
     except Exception as e:
         print(f"An error occurred: {e}")
