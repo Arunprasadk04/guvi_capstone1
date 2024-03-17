@@ -49,6 +49,8 @@ The application supports various SQL queries for data analysis, including:
 Contributing
 
 Contributions are welcome! Please fork the repository, make your changes, and submit a pull request.# guvi_capstone1
-YouTube Data Extraction and Visualization
+
+YouTube Data Harvesting
+
 This project consists of modules for extracting data from the YouTube API, storing it in MongoDB, migrating it to MySQL, and displaying it using Streamlit.
 
