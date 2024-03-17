@@ -1,0 +1,692 @@
+from datetime import datetime
+import isodate
+import mysql.connector
+import pandas as pd
+import pymongo
+import streamlit as st
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+
+# Function to connect to the YouTube API
+def connect_to_youtube_api(api_key):
+    try:
+        youtube_api = build("youtube", "v3", developerKey=api_key)
+        print("Connecting to YouTube API...")
+        return youtube_api
+    except Exception as e:
+        print(f"An error occurred while connecting to YouTube API: {e}")
+        return None
+
+
+# Function to fetch YouTube data
+def fetch_youtube_data(youtube_api, channel_ids):
+    try:
+        channel_data = []
+        video_info = []
+        playlist_info = []
+        comment_info = []
+
+        for channel_id in channel_ids:
+            # Fetch channel data
+            channel_request = youtube_api.channels().list(part="snippet,statistics", id=channel_id)
+            response = channel_request.execute()
+            # print("Channel API response:", response)
+            if "items" in response:
+                item = response["items"][0]
+                channel_info = {
+                    "channel_id": item["id"],
+                    "channel_name": item["snippet"]["title"],
+                    "subscribers": int(item["statistics"]["subscriberCount"]),
+                    "total_videos": int(item["statistics"]["videoCount"]),
+                    "total_views": 0
+                }
+                channel_data.append(channel_info)
+
+                # Fetch videos
+                videos_request = youtube_api.search().list(part="snippet", channelId=channel_id, type="video",
+                                                           maxResults=50)
+                videos_response = videos_request.execute()
+
+                for video_item in videos_response.get("items", []):
+                    video_id = video_item["id"]["videoId"]
+                    video_snippet = video_item["snippet"]
+                    video_published_at = datetime.strptime(video_snippet["publishedAt"], "%Y-%m-%dT%H:%M:%SZ")
+
+                    # Fetch video statistics
+                    video_statistics_request = youtube_api.videos().list(part="statistics", id=video_id)
+                    video_statistics_response = video_statistics_request.execute()
+
+                    # Extract video statistics
+                    if video_statistics_response.get("items"):
+                        statistics = video_statistics_response["items"][0]["statistics"]
+                        view_count = int(statistics.get("viewCount", 0))
+                        like_count = int(statistics.get("likeCount", 0))
+                        dislike_count = int(statistics.get("dislikeCount", 0))
+                        comments_count = int(statistics.get("commentCount", 0))
+                    else:
+                        view_count = 0
+                        like_count = 0
+                        dislike_count = 0
+                        comments_count = 0
+
+                    # Fetch content details
+                    content_details_request = youtube_api.videos().list(part="contentDetails", id=video_id)
+                    content_details_response = content_details_request.execute()
+
+                    # Extract content details
+                    # Extract content details
+                    if content_details_response.get("items"):
+                        content_details = content_details_response["items"][0]["contentDetails"]
+                        duration_iso = content_details["duration"]
+                        # Parse duration from ISO 8601 format
+                        if duration_iso:
+                            # Convert ISO 8601 duration to minutes
+                            duration_minutes = isodate.parse_duration(duration_iso).total_seconds() / 60
+                        else:
+                            duration_minutes = None
+                    else:
+                        duration_minutes = None
+
+                    video_info.append({
+                        "video_id": video_id,
+                        "title": video_snippet["title"],
+                        "description": video_snippet.get("description", ""),
+                        "thumbnail_url": video_snippet["thumbnails"]["default"]["url"],
+                        "channel_title": video_snippet["channelTitle"],
+                        "published_at": video_published_at,
+                        "channel_id": channel_id,
+                        "views": view_count,
+                        "duration_minutes": round(duration_minutes, 2),
+                        "likes": like_count,
+                        "dislikes": dislike_count,
+                        "comments": comments_count
+                    })
+
+                    channel_info["total_views"] += view_count
+
+                    # Fetch comments for each video
+                    try:
+                        comments_request = youtube_api.commentThreads().list(part="snippet", videoId=video_id)
+
+                        comments_response = comments_request.execute()
+                        for comment_item in comments_response.get("items", []):
+                            comment_snippet = comment_item["snippet"]["topLevelComment"]["snippet"]
+                            comment_published_at = datetime.strptime(comment_snippet["publishedAt"],
+                                                                     "%Y-%m-%dT%H:%M:%SZ")
+                            comment_info.append({
+                                "comment_id": comment_item["id"],
+                                "video_id": video_id,
+                                "author": comment_snippet["authorDisplayName"],
+                                "text": comment_snippet["textDisplay"],
+                                "like_count": comment_snippet["likeCount"],
+                                "published_at": comment_published_at,
+                                "channel_id": channel_id
+                            })
+                    except HttpError as e:
+                        if e.resp.status == 403 and "commentsDisabled" in str(e.content):
+                            print(f"Comments are disabled for video {video_id}. Skipping comment fetching.")
+                        else:
+                            print(f"An error occurred while fetching comments for video {video_id}: {e}")
+
+                # Fetch playlists
+                playlists_request = youtube_api.playlists().list(part="snippet", channelId=channel_id,
+                                                                 maxResults=50)
+                playlists_response = playlists_request.execute()
+                # print("Playlists API response:", playlists_response)
+                for playlist_item in playlists_response.get("items", []):
+                    total_videos = playlist_item.get("contentDetails", {}).get("itemCount", 0)
+                    playlist_info.append({
+                        "playlist_id": playlist_item["id"],
+                        "title": playlist_item["snippet"]["title"],
+                        "description": playlist_item["snippet"]["description"],
+                        "channel_title": playlist_item["snippet"]["channelTitle"],
+                        "total_videos": total_videos,
+                        "channel_id": channel_id
+                    })
+
+            else:
+                print(f"No channel found with ID: {channel_id}")
+
+        return channel_data, video_info, playlist_info, comment_info
+
+    except Exception as e:
+        print(f"An error occurred while fetching YouTube data for channel ID(s) {channel_ids}: {e}")
+        return [], [], [], []
+
+
+# Function to insert data into MongoDB
+def insert_into_mongodb(mongo_client, channel_data, video_info, playlist_info, comment_info):
+    try:
+        mongo_db = mongo_client.youtube
+        if channel_data:
+            mongo_db.channels.insert_many(channel_data)
+        if video_info:
+            mongo_db.videos.insert_many(video_info)
+        if playlist_info:
+            mongo_db.playlists.insert_many(playlist_info)
+        if comment_info:
+            mongo_db.comments.insert_many(comment_info)
+        print("Data inserted into MongoDB.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while inserting data into MongoDB: {e}")
+        return False
+
+
+# Function to create a MySQL connection
+def create_mysql_connection():
+    try:
+        mysql_connection = mysql.connector.connect(host="localhost", user="USERNAME", password="PASSWORD")
+        if mysql_connection.is_connected():
+            print("Connected to MySQL server")
+            return mysql_connection
+        else:
+            print("Failed to connect to MySQL server.")
+            return None
+    except Exception as e:
+        print(f"An error occurred while connecting to MySQL server: {e}")
+        return None
+
+
+def create_mysql_database(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mysql_cursor.execute("CREATE DATABASE IF NOT EXISTS youtube_data")
+        mysql_cursor.execute("USE youtube_data")
+
+        # Function to create MySQL tables
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                channel_id VARCHAR(255),
+                channel_name VARCHAR(255),
+                subscribers INT,
+                total_videos INT,
+                total_views INT
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS video_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                video_id VARCHAR(255),
+                title VARCHAR(255),
+                description TEXT,
+                thumbnail_url TEXT,
+                channel_title VARCHAR(255),
+                published_at DATETIME,
+                channel_id VARCHAR(255),
+                views INT,
+                duration_minutes VARCHAR(50),
+                likes INT,
+                dislikes INT,
+                comments INT
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS playlist_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                playlist_id VARCHAR(255),
+                title VARCHAR(255),
+                description TEXT,
+                channel_title VARCHAR(255),
+                total_videos INT,
+                channel_id VARCHAR(255)
+            )
+        """)
+        mysql_cursor.execute("""
+            CREATE TABLE IF NOT EXISTS comment_info (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                comment_id VARCHAR(255),
+                video_id VARCHAR(255),
+                author VARCHAR(255),
+                text TEXT,
+                like_count INT,
+                published_at DATETIME,
+                channel_id VARCHAR(255)
+            )
+        """)
+        mysql_connection.commit()
+        mysql_cursor.close()
+        print("MySQL tables created successfully.")
+        return mysql_connection
+    except Exception as e:
+        print(f"An error occurred while creating MySQL tables: {e}")
+        return False
+
+
+# Function to migrate channel data to MySQL
+def migrate_channel_data(mysql_connection, mongo_client, channel_id):
+    mysql_cursor = None
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mongo_db = mongo_client.youtube
+
+        # Fetch channel data from MongoDB for the specified channel ID
+        channel_data_cursor = mongo_db.channels.find({"channel_id": channel_id})
+
+        for channel_data in channel_data_cursor:
+            # Migrate channel data to MySQL
+            mysql_cursor.execute(
+                "INSERT INTO channel_data (channel_id, channel_name, subscribers, total_videos, total_views) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (channel_data["channel_id"], channel_data["channel_name"], channel_data["subscribers"],
+                 channel_data["total_videos"], channel_data["total_views"]))
+
+            mysql_connection.commit()
+            print("Channel data migrated from MongoDB to MySQL successfully.")
+
+        # Move the return statement outside the loop
+        print("All channel data migrated from MongoDB to MySQL.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while migrating channel data from MongoDB to MySQL: {e}")
+        return False
+    finally:
+        if mysql_cursor:
+            mysql_cursor.close()
+
+
+# Function to migrate video data to MySQL
+def migrate_video_data(mysql_connection, mongo_client, channel_id):
+    mysql_cursor = None  # Initialize the cursor outside the try block
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mongo_db = mongo_client.youtube
+
+        # Fetch video data from MongoDB
+        video_info_cursor = mongo_db.videos.find({"channel_id": channel_id})
+
+        for video in video_info_cursor:
+            mysql_cursor.execute("""
+                INSERT INTO video_info (video_id, title, description, thumbnail_url, channel_title, published_at,
+                                        channel_id, views, duration_minutes, likes, dislikes, comments)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """, (video["video_id"], video["title"], video["description"], video["thumbnail_url"],
+                  video["channel_title"], video["published_at"], video["channel_id"], video["views"],
+                  video["duration_minutes"], video["likes"], video["dislikes"], video["comments"]))
+        mysql_connection.commit()
+        print("Video data migrated to MySQL.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while migrating video data from MongoDB to MySQL: {e}")
+        return False
+    finally:
+        if mysql_cursor:
+            mysql_cursor.close()
+
+
+# Function to migrate playlist data to MySQL
+def migrate_playlist_data(mysql_connection, mongo_client, channel_id):
+    mysql_cursor = None  # Initialize the cursor outside the try block
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mongo_db = mongo_client.youtube
+
+        # Fetch playlist data from MongoDB
+        playlist_info_cursor = mongo_db.playlists.find({"channel_id": channel_id})
+
+        for playlist in playlist_info_cursor:
+            mysql_cursor.execute("""
+                INSERT INTO playlist_info (playlist_id, title, description, channel_title, total_videos, channel_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (playlist["playlist_id"], playlist["title"], playlist["description"], playlist["channel_title"],
+                  playlist["total_videos"], playlist["channel_id"]))
+        mysql_connection.commit()
+        print("Playlist data migrated to MySQL.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while migrating playlist data from MongoDB to MySQL: {e}")
+        return False
+    finally:
+        if mysql_cursor:
+            mysql_cursor.close()
+
+
+# Function to migrate comment data to MySQL
+def migrate_comment_data(mysql_connection, mongo_client, channel_id):
+    mysql_cursor = None  # Initialize the cursor outside the try block
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        mongo_db = mongo_client.youtube
+
+        # Fetch comment data from MongoDB
+        comment_info_cursor = mongo_db.comments.find({"channel_id": channel_id})
+
+        for comment in comment_info_cursor:
+            mysql_cursor.execute("""
+                INSERT INTO comment_info (comment_id, video_id, author, text, like_count, published_at, channel_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (comment["comment_id"], comment["video_id"], comment["author"], comment["text"],
+                  comment["like_count"], comment["published_at"], comment["channel_id"]))
+        mysql_connection.commit()
+        print("Comment data migrated to MySQL.")
+        return True
+    except Exception as e:
+        print(f"An error occurred while migrating comment data from MongoDB to MySQL: {e}")
+        return False
+    finally:
+        if mysql_cursor:
+            mysql_cursor.close()
+
+
+# Function to fetch data from MySQL
+def fetch_data_from_mysql(mysql_connection, table_name):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute(f"SELECT * FROM {table_name}")
+        # Fetch all records
+        data = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+# SQL Query Functions
+def query_videos_and_channels(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("select distinct title, channel_title from youtube_data.video_info")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_top_10_views(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT vi.video_id, vi.title AS video_title, vi.channel_title, "
+                             "vi.views FROM youtube_data.video_info AS vi ORDER BY vi.views DESC LIMIT 10;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_no_of_comments(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute(
+            "SELECT vi.video_id, vi.title AS video_title, vi.channel_title, COUNT(ci.comment_id) AS comment_count "
+            "FROM youtube_data.video_info AS vi LEFT JOIN youtube_data.comment_info AS ci ON vi.video_id = ci.video_id "
+            "GROUP BY vi.video_id, vi.title, vi.channel_title;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_more_no_of_likes(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT vi.video_id, vi.title AS video_title,"
+                             "vi.channel_title, vi.likes FROM youtube_data.video_info AS vi ORDER BY vi.likes DESC "
+                             "LIMIT 10;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_no_of_likes_dislikes(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT vi.video_id,vi.title AS video_title,vi.channel_title,SUM(vi.likes) AS total_likes,"
+                             "SUM(vi.dislikes) AS total_dislikes FROM youtube_data.video_info AS vi GROUP BY "
+                             "vi.video_id,"
+                             "vi.title,vi.channel_title;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_no_of_views_channel(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT channel_id, channel_title,SUM(views) AS total_views FROM "
+                             "youtube_data.video_info GROUP BY channel_id, channel_title;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_videos_in_year_2022(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT DISTINCT video_id, title FROM video_info WHERE YEAR(published_at) = 2022;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_avg_duration_video_channel(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT channel_title, AVG(duration_minutes) AS average_duration FROM video_info GROUP BY "
+                             "channel_title;")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def query_highest_no_comments(mysql_connection):
+    try:
+        mysql_cursor = mysql_connection.cursor()
+        # Execute a query to select all records from the specified table
+        mysql_cursor.execute("SELECT vi.video_id, vi.title AS video_title, vi.channel_title, vi.comments "
+                             "FROM video_info AS vi ORDER BY vi.comments DESC LIMIT 10  ")
+        # Fetch all records
+        data1 = mysql_cursor.fetchall()
+        # Get column names
+        columns = [i[0] for i in mysql_cursor.description]
+        return data1, columns
+    except Exception as e:
+        st.error(f"An error occurred while fetching data from MySQL: {e}")
+        return None, None
+
+
+def main():
+    try:
+        # Streamlit app setup
+        st.title("YouTube Data Migration and Analysis")
+
+        # Initialize mysql_connection variable
+        mysql_connection = None
+        result_channel = None
+        result_video = None
+        result_playlist = None
+        result_comment = None
+
+        # Input for channel ID or IDs
+        channel_ids_input = st.text_input("Enter the channel ID(s) separated by commas:")
+        migrate_button = st.button("Migrate Data")
+
+        if migrate_button:
+            if channel_ids_input:
+                # Split the input channel IDs
+                channel_ids = [channel_id.strip() for channel_id in channel_ids_input.split(",")]
+
+                # Migrate data from MongoDB to MySQL
+                api_key = "ENTER YOUR YOUTUBE API KEY"  # Replace with your YouTube API key
+                youtube_api = connect_to_youtube_api(api_key)
+                if not youtube_api:
+                    st.error("Failed to connect to the YouTube API.")
+                    return
+
+                # Fetch data from YouTube API
+                all_channel_data = []
+                all_video_info = []
+                all_playlist_info = []
+                all_comment_info = []
+                for channel_id in channel_ids:
+                    channel_data, video_info, playlist_info, comment_info = fetch_youtube_data(youtube_api,
+                                                                                               [channel_id])
+                    if not channel_data or not video_info or not playlist_info or not comment_info:
+                        st.error(f"Failed to fetch data for channel ID: {channel_id}")
+                        continue
+                    all_channel_data.extend(channel_data)
+                    all_video_info.extend(video_info)
+                    all_playlist_info.extend(playlist_info)
+                    all_comment_info.extend(comment_info)
+
+                if not all_channel_data or not all_video_info or not all_playlist_info or not all_comment_info:
+                    st.error("Failed to fetch data from the YouTube API for any of the provided channel IDs.")
+                    return
+
+                # MongoDB connection
+                mongo_client = pymongo.MongoClient("mongodb://localhost:27017/")
+
+                if not insert_into_mongodb(mongo_client, all_channel_data, all_video_info, all_playlist_info,
+                                           all_comment_info):
+                    st.error("Failed to insert data into MongoDB.")
+                    return
+
+                # MySQL connection
+                mysql_connection = create_mysql_connection()
+                if not mysql_connection:
+                    st.error("Failed to connect to MySQL server.")
+                    return
+
+                # Create MySQL database and tables if not exists
+                if not create_mysql_database(mysql_connection):
+                    st.error("Failed to create MySQL tables.")
+                    return
+
+                # Migrate data to MySQL
+                for channel_id in channel_ids:
+                    result_channel = migrate_channel_data(mysql_connection, mongo_client, channel_id)
+                    result_video = migrate_video_data(mysql_connection, mongo_client, channel_id)
+                    result_playlist = migrate_playlist_data(mysql_connection, mongo_client, channel_id)
+                    result_comment = migrate_comment_data(mysql_connection, mongo_client, channel_id)
+
+                    if not (result_channel and result_video and result_playlist and result_comment):
+                        st.error(
+                            f"Data migration failed for channel ID: {channel_id}. Please check the logs for details.")
+
+                if all(result_channel and result_video and result_playlist and result_comment for channel_id in
+                       channel_ids):
+                    st.success("Data migration successful.")
+                else:
+                    st.error("Data migration failed for some channels. Please check the logs for details.")
+            else:
+                st.warning("Please enter at least one valid channel ID.")
+
+        # Dropdown menu to select table name
+        table_name = st.selectbox("Select table name:", ["channel_data", "video_info", "playlist_info", "comment_info"])
+
+        if table_name:
+            # Ensure mysql_connection is initialized before using it
+            if mysql_connection is None:
+                mysql_connection = create_mysql_connection()
+                if mysql_connection is None:
+                    st.error("Failed to connect to MySQL server.")
+                    return
+            mysql_cursor = mysql_connection.cursor()
+
+            # Select the appropriate database
+
+            mysql_cursor.execute("USE youtube_data")
+
+            # Fetch data from MySQL based on selected table name
+            data, columns = fetch_data_from_mysql(mysql_connection, table_name)
+            if data and columns:
+                # Display data in a DataFrame
+                df = pd.DataFrame(data, columns=columns)
+                st.write(f"Displaying {table_name} records:")
+                st.write(df)
+            else:
+                st.warning("No data found for the selected table.")
+
+        # SQL queries and display results
+        if st.checkbox("Perform SQL Queries"):
+            # Ensure mysql_connection is initialized before using it
+            if mysql_connection is None:
+                mysql_connection = create_mysql_connection()
+                if mysql_connection is None:
+                    st.error("Failed to connect to MySQL server.")
+                    return
+
+            mysql_cursor = mysql_connection.cursor()
+            mysql_cursor.execute("USE youtube_data")
+
+            # Execute SQL queries
+            query_results = {
+                "Names of all videos and their corresponding channels": query_videos_and_channels(mysql_connection),
+                "Top 10 Views": query_top_10_views(mysql_connection),
+                "No of comments": query_no_of_comments(mysql_connection),
+                "Highest no. of likes": query_more_no_of_likes(mysql_connection),
+                "No.of likes & dislikes": query_no_of_likes_dislikes(mysql_connection),
+                "No.of views for each channel": query_no_of_views_channel(mysql_connection),
+                "No. of videos in year 2022": query_videos_in_year_2022(mysql_connection),
+                "Avg. duration of all videos in each channel": query_avg_duration_video_channel(mysql_connection),
+                "Highest no.of comments": query_highest_no_comments(mysql_connection)
+            }
+
+            # Display query results as tables
+            for query_name, result in query_results.items():
+                st.subheader(query_name)
+                if result is not None:
+                    data, columns = result
+                    if data:
+                        df = pd.DataFrame(data, columns=[str(col) for col in columns])
+                        st.write(df)
+                    else:
+                        st.warning("No data found for this query.")
+                else:
+                    st.error("An error occurred while executing the query.")
+
+    except Exception as e:
+        st.error(f"An error occurred: {e}")
+
+
+if __name__ == "__main__":
+    main()
